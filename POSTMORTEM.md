@@ -142,7 +142,7 @@ Attach the following IAM policy to the EC2 instance:
 CloudWatchAgentServerPolicy
 ```
 
-Install CloudWatch Agent.
+Install the CloudWatch Agent.
 
 ```bash
 wget https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
@@ -150,10 +150,23 @@ wget https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-
 sudo dpkg -i -E amazon-cloudwatch-agent.deb
 ```
 
+Create the configuration directory.
+
+```bash
+sudo mkdir -p /opt/aws/amazon-cloudwatch-agent/etc
+```
+
+Create the configuration file.
+
+```bash
+sudo vi /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+```
+
 Configure the agent to:
 
-* Send `/var/log/storage-breaker/application.log` to CloudWatch Logs.
-* Publish `disk_used_percent` and `mem_used_percent` metrics.
+* Collect `/var/log/storage-breaker/application.log`
+* Send logs to CloudWatch Logs
+* Publish `cpu_usage_idle`, `disk_used_percent` and `mem_used_percent` metrics
 
 Start the agent.
 
@@ -165,20 +178,25 @@ sudo amazon-cloudwatch-agent-ctl \
 -s
 ```
 
-Verify:
+Verify the agent is running.
 
 ```bash
 systemctl status amazon-cloudwatch-agent
 ```
 
----
+Verify in AWS Console:
+
+* **CloudWatch → Log Groups** → `storage-breaker`
+* **CloudWatch → Metrics** → `StorageBreaker` namespace
 
 ## CloudWatch Alarms
 
 Create CloudWatch alarms using the metrics published by the CloudWatch Agent.
 
 * `disk_used_percent` > **80%**
-* `mem_used_percent` > **90%**
+* `mem_used_percent` > **80%**
+* `cpu_used_percent` > **80%**
+
 
 Configure both alarms to send notifications through an SNS topic (Email).
 
