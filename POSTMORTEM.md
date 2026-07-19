@@ -2,100 +2,108 @@
 
 ## Deployment
 
-The code has deployed as per instruction in README.
+The application was deployed following the `README`.
 
-Ran this cmd to have right file ownership on ubuntu user.
+### Prepare application directory
 
 ```bash
+sudo useradd \
+  --system \
+  --home /opt/storage-breaker \
+  --shell /usr/sbin/nologin \
+  appuser
+
 sudo mkdir -p /opt/storage-breaker
-sudo chown -R ubuntu:ubuntu /opt/storage-breaker
+sudo mkdir -p /var/log/storage-breaker
+
+sudo chown -R appuser:appuser /opt/storage-breaker
+sudo chown -R appuser:appuser /var/log/storage-breaker
 ```
 
-Then ran this command to copy the code that I clone.
+### Clone application
 
 ```bash
-rsync -av ~/ape-aws-ec2-assessment-1/ /opt/storage-breaker/
+sudo -u appuser git clone \
+https://github.com/khantnaingset-kns/ape-aws-ec2-assessment-1.git \
+/opt/storage-breaker
 ```
 
-Then I can now activate venv, install dependencies and start the server as instructed with this cmd below.
+### Install dependencies
 
 ```bash
+sudo -u appuser -H bash
+
 cd /opt/storage-breaker
+
+python3 -m venv .venv
 
 source .venv/bin/activate
 
 pip install -r requirements.txt
+```
 
-.venv/bin/uvicorn app:app \
+### Run application
+
+```bash
+/usr/local/bin/storage-breaker app:app \
   --host 127.0.0.1 \
   --port 3000 \
   --workers 1 \
   --no-access-log
 ```
 
-## Nginx Configuration
+`/usr/local/bin/storage-breaker` is a symlink to:
 
-Configure Nginx as a reverse proxy from port `80` to:
-
+```text
+/opt/storage-breaker/.venv/bin/uvicorn
 ```
+
+### Nginx
+
+Configure Nginx to reverse proxy:
+
+```text
 http://127.0.0.1:3000
 ```
-
-Can test from locally and from nginx too.
 
 ---
 
 # Investigation
 
-While checking around 2 hours after running webserver, `curl` request to health check route becomes unhealthy status.
+After approximately 2 hours, the health endpoint returned an unhealthy status.
 
-EC2 volume monitoring, average write size had kept increased before server hangs.
+Investigation found:
 
-I consoled EC2, and checked logs with this cmd and found out application is writing `xxx` logs continously.
+* Application continuously wrote `xxx` logs.
+* `application.log` grew to **6.3 GB**.
+* Root filesystem reached **100%** usage.
 
 ```bash
 tail -f /var/log/storage-breaker/application.log
-```
 
-Also checked `df -h` and root volume has used 100%.
+df -h
 
-I checked application log file storage usage too.
-
-```bash
 ls -lh /var/log/storage-breaker/application.log
 ```
 
-Output:
-
-```text
--rw-rw-r-- 1 ubuntu ubuntu 6.3G Jul 14 11:26 /var/log/storage-breaker/application.log
-```
+---
 
 ## Immediate Recovery
 
-For immediate fix to recover, I truncate the log with this cmd and verify log file storage usage.
+To recover the service without manually truncating the log file, configure `logrotate` and rotate the oversized log.
 
 ```bash
-sudo truncate -s 0 /var/log/storage-breaker/application.log
-```
+sudo logrotate -f /etc/logrotate.d/storage-breaker
 
-When curl the health check endpoint, it healthy again.
+The application became healthy again after freeing disk space.
 
 ---
 
 # Prevention
 
-To prevent recurrence this issue, I use `logrotate` on Linux upon log size.
+## Log Rotation
 
-## 1. Create logrotate configuration
-
-Create the logrotate file.
-
-```bash
-sudo vi /etc/logrotate.d/storage-breaker
-```
-
-Add this configuration.
+Configure logrotate.
 
 ```text
 /var/log/storage-breaker/application.log {
@@ -103,77 +111,79 @@ Add this configuration.
     rotate 10
     compress
     delaycompress
+    copytruncate
     missingok
     notifempty
-    create 0644 ubuntu ubuntu
+    create 0644 appuser appuser
 }
 ```
 
----
-
-## 2. Configure a custom systemd timer
-
-A custom systemd timer is configured to run this logrotate.
-
-### Create `/etc/systemd/system/storage-breaker-logrotate.service`
-
-```ini
-[Unit]
-Description=Run logrotate for storage-breaker
-
-[Service]
-Type=oneshot
-ExecStart=/usr/sbin/logrotate /etc/logrotate.d/storage-breaker
-```
-
-### Create `/etc/systemd/system/storage-breaker-logrotate.timer`
-
-```ini
-[Unit]
-Description=Run storage-breaker logrotate every 15 minutes
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=15min
-Unit=storage-breaker-logrotate.service
-
-[Install]
-WantedBy=timers.target
-```
-
----
-
-## 3. Reload systemd
+Create a custom systemd timer to run logrotate every 15 minutes.
 
 ```bash
 sudo systemctl daemon-reload
-```
-
-## 4. Enable the timer
-
-```bash
 sudo systemctl enable --now storage-breaker-logrotate.timer
 ```
 
-## 5. Verify
-
-Check the timer.
+Verify:
 
 ```bash
 systemctl status storage-breaker-logrotate.timer
-```
-
-Verify the service.
-
-```bash
 systemctl status storage-breaker-logrotate.service
 ```
 
-the rotated files will be:
+---
+
+## CloudWatch Agent
+
+Attach the following IAM policy to the EC2 instance:
+
+```text
+CloudWatchAgentServerPolicy
+```
+
+Install CloudWatch Agent.
 
 ```bash
-/var/log/storage-breaker/application.log.1
-/var/log/storage-breaker/application.log.2.gz
-/var/log/storage-breaker/application.log.3.gz
-...
+wget https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+
+sudo dpkg -i -E amazon-cloudwatch-agent.deb
 ```
+
+Configure the agent to:
+
+* Send `/var/log/storage-breaker/application.log` to CloudWatch Logs.
+* Publish `disk_used_percent` and `mem_used_percent` metrics.
+
+Start the agent.
+
+```bash
+sudo amazon-cloudwatch-agent-ctl \
+-a fetch-config \
+-m ec2 \
+-c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json \
+-s
+```
+
+Verify:
+
+```bash
+systemctl status amazon-cloudwatch-agent
+```
+
+---
+
+## CloudWatch Alarms
+
+Create CloudWatch alarms using the metrics published by the CloudWatch Agent.
+
+* `disk_used_percent` > **80%**
+* `mem_used_percent` > **90%**
+
+Configure both alarms to send notifications through an SNS topic (Email).
+
+This provides:
+
+* Automatic log rotation to prevent disk exhaustion.
+* Centralized log collection in CloudWatch Logs.
+* Proactive alerts before disk or memory usage impacts the application.
